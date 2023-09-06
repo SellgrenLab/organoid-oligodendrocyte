@@ -1,0 +1,228 @@
+---
+title: "Oligodendrocyte-Organoid"
+author: "Susmita Malwade"
+date: "2022-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Oligodendrocyte-organoid project
+
+```{r }
+library(Seurat)
+library(dplyr)
+library(magrittr)
+library(scDblFinder)
+library(ggplot2)
+library(glmGamPoi)
+library(harmony)
+
+```
+
+## Single nuclei 3' RNA sequencing data. 10X genomics Chromium platform. 
+
+
+ Total 12727 cells as output from cellranger
+
+```{r , echo=FALSE}
+project.data<-Read10X(data.dir="./Oligo")
+oligo <- CreateSeuratObject(counts = project.data[1], project = "Oligo-project", min.cells =3, min.features = 200)
+#oligo <- readRDS("./Oligo_organoid_seuratobj_unprocessed.rds") 
+```
+
+Processing in R for quality control. import loom files from velocyto in python for velocity analysis. (velocyto does not include MT genes in alignment for some reason. Cellranger does)
+
+```{r}
+oligo[["percent.mt"]] <- PercentageFeatureSet(oligo, pattern = "^MT-")
+oligo[["percent.ribo"]] <- PercentageFeatureSet(oligo, pattern = "^RP[SL]")
+```
+
+Raw QC plots:
+
+```{r}
+plot1 <- FeatureScatter(oligo, feature1 = "nCount_RNA", feature2 = "percent.mt") + geom_hline(yintercept = 15)
+plot2 <- FeatureScatter(oligo, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + geom_vline(xintercept = 60000) + geom_hline(yintercept = 11000)
+plot1 + plot2
+```
+
+Thresholds:
+```{r}
+oligo_filtered <- subset(oligo, subset = nFeature_RNA > 200 & nFeature_RNA < 11000 & percent.mt < 15 & nCount_RNA < 60000)
+
+plot1 <- FeatureScatter(oligo_filtered, feature1 = "nCount_RNA", feature2 = "percent.mt") 
+plot2 <- FeatureScatter(oligo_filtered, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") 
+plot1 + plot2
+```
+
+
+Add metadata
+
+```{r}
+oligo_filtered$dataset <- "vForebrain organoid-Oligodenrocytes"
+oligo_filtered$tissue <- "Organoid"
+oligo_filtered$age <- "D250" 
+
+```
+
+
+```{r}
+selected_c <- WhichCells(oligo_filtered, expression = nFeature_RNA > 200)
+selected_f <- rownames(oligo_filtered)[ Matrix::rowSums(oligo_filtered) > 3]
+data.filt <- subset(oligo_filtered, features=selected_f, cells=selected_c)
+dim(data.filt)
+```
+
+```{r}
+#Compute the relative expression of each gene per cell
+#Use sparse matrix operations, if your dataset is large, doing matrix devisions the regular way will take a very long time.
+par(mar=c(4,8,2,1))
+C <- data.filt@assays$RNA@counts
+C <-  Matrix::t( Matrix::t(C) / Matrix::colSums(C) ) * 100
+most_expressed <- order(apply(C,1,median),decreasing = T)[20:1]
+boxplot( as.matrix(t(C[most_expressed,])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE)
+
+```
+
+
+```{r}
+# Filter MALAT1
+data.filt <- data.filt[ ! grepl("MALAT1", rownames(data.filt)), ]
+# Filter Mitocondrial
+data.filt <- data.filt[ ! grepl("^MT-", rownames(data.filt)), ]
+```
+
+Cell-cycle scoring
+
+```{r}
+
+data.filt <- CellCycleScoring(object = data.filt,
+                              g2m.features = cc.genes.updated.2019$g2m.genes,
+                              s.features = cc.genes.updated.2019$s.genes)
+```
+
+# Multiple detection and removal
+
+```{r}
+
+suppressMessages(require(Matrix))
+suppressMessages(require(DoubletFinder))
+```
+
+
+```{r }
+data.filt = NormalizeData(data.filt)
+data.filt = FindVariableFeatures(data.filt, verbose = F)
+data.filt = ScaleData(data.filt, vars.to.regress = c("nFeature_RNA"), verbose = F)
+data.filt = RunPCA(data.filt, verbose = F, npcs = 20)
+data.filt = RunUMAP(data.filt, dims = 1:10, verbose = F)
+```
+
+```{r doublets}
+sweep.res <- paramSweep_v3(data.filt)
+sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)
+bcmvn <- find.pK(sweep.stats)
+barplot(bcmvn$BCmetric, names.arg = bcmvn$pK, las=2)
+# define the expected number of doublet cellscells.
+nExp <- round(ncol(data.filt)* 0.09) # expect 9% doublets
+
+data.filt <- doubletFinder_v3(data.filt, pN=0.25, pK = 0.22, nExp = nExp, PCs = 1:10)
+
+# name of the DF prediction can change, so extract the correct column name.
+DF.name = colnames(data.filt@meta.data)[grepl("DF.classification", colnames(data.filt@meta.data))]
+cowplot::plot_grid( ncol = 2,
+DimPlot(data.filt, group.by = "orig.ident") + NoAxes(),
+DimPlot(data.filt, group.by = DF.name) + NoAxes()
+)
+
+VlnPlot(data.filt, features = "nFeature_RNA", group.by = DF.name, pt.size = .1)
+
+data.filt = data.filt[,data.filt@meta.data[,DF.name] == "Singlet"]
+dim(data.filt)
+
+
+```
+1138 doublets identified by doublet finder
+
+Check with scdblfinder
+```{r}
+
+library(SingleCellExperiment)
+sce <- SingleCellExperiment(assays = list(counts = data.filt[["RNA"]]@counts))
+sce <- scDblFinder(sce)
+data.filt$multiplet_class <- colData(sce)$scDblFinder.class
+
+
+```
+Threshold found:0.349
+2126 (16.8%) doublets called by scdblfinder
+
+Removing doublets from doubletfindet but keep an eye on other doublets.
+
+```{r}
+data.filt = data.filt[,data.filt@meta.data[,DF.name] == "Singlet"]
+dim(data.filt)
+```
+11501 cells remaining after doublet removal
+
+## Gruffi- remove stressed cells
+
+```{r}
+library(gruffi)
+combined.obj <- data.filt
+combined.obj@misc$reductions.backup$umap2d <- combined.obj@reductions$umap
+combined.obj <- Seurat.utils::SetupReductionsNtoKdimensions(obj = combined.obj, nPCs = 10, dimensions=3, reduction="umap")
+combined.obj@reductions$umap <- combined.obj@misc$reductions.backup$umap2d
+ensembl <- biomaRt::useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+go1 <- "GO:0006096" # Glycolysis, "ENO1"   "MTOR"   "PRKAA2" "PGM1"   "ARNT"   "PKLR"  
+go2 <- "GO:0034976" # ER-stress, "UBE2J2" "PARK7"  "UBE4B"  "FBXO2"  "FBXO44" "FBXO6" 
+go3 <- "GO:0042063" # Gliogenesis, negative filtering, "MXRA8"  "SKI"    "HES5"   "TP73"   "GPR157" "MTOR" 
+combined.obj <- aut.res.clustering(obj = combined.obj, assay = "RNA") #error stuck here, look at it later
+granule.res.4.gruffi <- combined.obj@misc$gruffi$'optimal.granule.res'
+
+
+
+### Demultiplexing cell lines using souporcell (run using singularity on HPC)
+soup <- data.table::fread('./souporcell_assignments.tsv', header=T)
+data.filt$assignment<- soup$assignment[match(rownames(data.filt@meta.data), soup$barcode)]
+
+```
+
+
+```{r}
+saveRDS(data.filt,"Oligo_seurat_qc_processed.rds")
+write.csv(rownames(data.filt@meta.data), "Oligo_qc_cell_barcodes.csv")
+```
+
+
+### Dimension reduction and clustering
+
+```{r}
+# run sctransform
+data.filt$CC.Difference <- data.filt$S.Score - data.filt$G2M.Score
+#data.filt<- SCTransform(data.filt, vars.to.regress = "CC.Difference", verbose = FALSE, method = "glmGamPoi") #UMAP shows batch effects on assignment
+#Run integration
+oligo.list <- SplitObject(data.filt, split.by = "assignment")
+oligo.list <- lapply(X = oligo.list, FUN = SCTransform)
+features <- SelectIntegrationFeatures(object.list = oligo.list, nfeatures = 3000)
+oligo.list <- PrepSCTIntegration(object.list = oligo.list, anchor.features = features)
+oligo.anchors <- FindIntegrationAnchors(object.list = oligo.list, normalization.method = "SCT",
+    anchor.features = features)
+    
+oligo.combined.sct <- IntegrateData(anchorset = oligo.anchors, normalization.method = "SCT")
+data.filt <- RunPCA(oligo.combined.sct, verbose = FALSE)
+data.filt <- RunUMAP(data.filt, dims = 1:30, verbose = FALSE)
+data.filt <- FindNeighbors(data.filt, dims = 1:30, verbose = FALSE)
+data.filt <- FindClusters(data.filt, res=c(0.4,0.6,0.8,1.4), verbose = FALSE)
+DimPlot(data.filt, label = TRUE) + NoLegend()
+
+
+saveRDS(data.filt, "oligo_clustering_processed_onject.rds")
+
+```
+
+
+
+
