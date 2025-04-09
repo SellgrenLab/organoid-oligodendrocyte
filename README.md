@@ -16,13 +16,14 @@ Recent work in animal models suggests that oligodendrocyte progenitor cells (OPC
 ## 📜 Key Scripts
 
 File	Description
+```
 Coexp_modules.R	Detects and visualizes co-expression modules using WGCNA
 crosstalk.R	Analyzes cell-cell communication networks using CellChat
 disease_enrichment.R	Performs enrichment analysis against disease gene sets
 plots.R	Generates figures for the manuscript
 qc_dimred_integration.Rmd	Performs quality control and dimensionality reduction using Seurat
 integrated_velocity.ipynb	Calculates and visualizes RNA velocity using scVelo
-
+```
 Note that the scripts in the main branch above are to be run independently. To run it linearly access the dev-co branch.
 
 ## 🔧 Dependencies
