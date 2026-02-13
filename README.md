@@ -27,7 +27,7 @@ File	Description
 Note that the scripts in the main branch above are to be run independently. To run it linearly access the dev-co branch.
 
 ## Citation
-
+[bioRxiv preprint](https://www.biorxiv.org/content/10.1101/2023.09.04.556176v1)
 [Nature Communications article](https://www.nature.com/articles/s41467-025-66521-1)
 
 
